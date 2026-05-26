@@ -1,4 +1,4 @@
-"""Tests for the canonical Pydantic shapes."""
+"""Tests for the Pydantic v2 shapes."""
 from __future__ import annotations
 
 import pytest
@@ -6,67 +6,82 @@ from pydantic import ValidationError
 
 from py_agent_ner import (
     EntitySpan,
-    ExtractedEntity,
-    Extraction,
+    LabelExtraction,
+    LabelPrompt,
     TaggedEntity,
     TrainingRecord,
 )
 
-# ---- ExtractedEntity ----
+# ---- LabelPrompt ----
 
 
-def test_extracted_entity_minimal() -> None:
-    e = ExtractedEntity(quote="Alice", label="person_name", confidence=0.9)
-    assert e.quote == "Alice"
-    assert e.label == "person_name"
+def test_label_prompt_basic() -> None:
+    lp = LabelPrompt(label="person_name", instructions="Full names.")
+    assert lp.label == "person_name"
+    assert lp.instructions == "Full names."
 
 
-def test_extracted_entity_rejects_empty_quote() -> None:
+def test_label_prompt_rejects_empty_label() -> None:
     with pytest.raises(ValidationError):
-        ExtractedEntity(quote="", label="x", confidence=0.5)
+        LabelPrompt(label="", instructions="x")
 
 
-def test_extracted_entity_rejects_empty_label() -> None:
+def test_label_prompt_rejects_empty_instructions() -> None:
     with pytest.raises(ValidationError):
-        ExtractedEntity(quote="x", label="", confidence=0.5)
+        LabelPrompt(label="x", instructions="")
 
 
-def test_extracted_entity_rejects_out_of_range_confidence() -> None:
+def test_label_prompt_is_frozen() -> None:
+    lp = LabelPrompt(label="x", instructions="y")
+    with pytest.raises(ValidationError, match="frozen"):
+        lp.label = "z"  # type: ignore[misc]
+
+
+# ---- LabelExtraction ----
+
+
+def test_label_extraction_basic() -> None:
+    le = LabelExtraction(label="person_name", matches=["Alice", "Bob"], confidence=0.9)
+    assert le.matches == ["Alice", "Bob"]
+
+
+def test_label_extraction_empty_matches_allowed() -> None:
+    """Empty matches = label not present. No sentinel."""
+    le = LabelExtraction(label="x", matches=[], confidence=0.5)
+    assert le.matches == []
+
+
+def test_label_extraction_matches_defaults_to_empty() -> None:
+    le = LabelExtraction(label="x", confidence=0.5)
+    assert le.matches == []
+
+
+def test_label_extraction_rejects_out_of_range_confidence() -> None:
     with pytest.raises(ValidationError):
-        ExtractedEntity(quote="x", label="y", confidence=1.5)
+        LabelExtraction(label="x", matches=["m"], confidence=1.5)
+    with pytest.raises(ValidationError):
+        LabelExtraction(label="x", matches=["m"], confidence=-0.1)
 
 
-def test_extracted_entity_quote_can_be_literal_none() -> None:
-    """No magic sentinel — 'none' is a valid quote (e.g., for sentiment labels)."""
-    e = ExtractedEntity(quote="none", label="negative_response", confidence=0.8)
-    assert e.quote == "none"
+def test_label_extraction_treats_none_as_literal_match() -> None:
+    """'none' is a valid match value — no magic sentinel."""
+    le = LabelExtraction(label="negative_response", matches=["none", "no"], confidence=0.7)
+    assert le.matches == ["none", "no"]
 
 
-def test_extracted_entity_label_can_be_named_none() -> None:
-    """No reserved label names."""
-    e = ExtractedEntity(quote="nothing", label="none", confidence=0.5)
-    assert e.label == "none"
-
-
-# ---- Extraction (LLM's full response) ----
-
-
-def test_extraction_defaults_to_empty_entities() -> None:
-    x = Extraction()
-    assert x.entities == []
-
-
-def test_extraction_accepts_list_of_entities() -> None:
-    x = Extraction(
-        entities=[
-            ExtractedEntity(quote="Alice", label="person_name", confidence=0.9),
-            ExtractedEntity(quote="Bob", label="person_name", confidence=0.8),
-        ]
-    )
-    assert len(x.entities) == 2
+def test_label_extraction_label_can_be_named_none() -> None:
+    """Nothing reserves the name 'none' for a label."""
+    le = LabelExtraction(label="none", matches=["nothing"], confidence=0.5)
+    assert le.label == "none"
 
 
 # ---- EntitySpan ----
+
+
+def test_entity_span_basic() -> None:
+    span = EntitySpan(text="Alice", start=0, end=5)
+    assert span.start == 0
+    assert span.end == 5
 
 
 def test_entity_span_rejects_end_le_start() -> None:
@@ -74,21 +89,9 @@ def test_entity_span_rejects_end_le_start() -> None:
         EntitySpan(text="x", start=5, end=5)
 
 
-def test_entity_span_offsets_check() -> None:
-    span = EntitySpan(text="Alice", start=0, end=5)
-    assert span.start == 0
-    assert span.end == 5
-    assert span.confidence is None  # default
-
-
-def test_entity_span_with_confidence() -> None:
-    span = EntitySpan(text="x", start=0, end=1, confidence=0.7)
-    assert span.confidence == 0.7
-
-
-def test_entity_span_rejects_out_of_range_confidence() -> None:
+def test_entity_span_rejects_negative_start() -> None:
     with pytest.raises(ValidationError):
-        EntitySpan(text="x", start=0, end=1, confidence=1.5)
+        EntitySpan(text="x", start=-1, end=3)
 
 
 # ---- TaggedEntity ----
@@ -110,8 +113,8 @@ def test_training_record_jsonl_round_trip() -> None:
                 label="person_name",
                 confidence=0.9,
                 spans=[
-                    EntitySpan(text="Alice", start=0, end=5, confidence=0.95),
-                    EntitySpan(text="Bob", start=10, end=13, confidence=0.85),
+                    EntitySpan(text="Alice", start=0, end=5),
+                    EntitySpan(text="Bob", start=10, end=13),
                 ],
             ),
         },
@@ -125,3 +128,10 @@ def test_models_are_frozen() -> None:
     span = EntitySpan(text="x", start=0, end=1)
     with pytest.raises(ValidationError, match="frozen"):
         span.start = 99  # type: ignore[misc]
+
+
+def test_label_extraction_schema_includes_descriptions() -> None:
+    """The descriptions on LabelExtraction become the LLM's schema guidance."""
+    schema = LabelExtraction.model_json_schema()
+    for field in ("label", "matches", "confidence"):
+        assert "description" in schema["properties"][field], field

@@ -1,15 +1,20 @@
-You are an entity extraction system.
+You are a {{ expert_role }} classifier.
 
-Extract every instance of the following entity types from the input text:
+You label ONE entity type at a time.
 
-{% for lp in label_prompts -%}
-- **{{ lp.label }}**: {{ lp.instructions }}
-{% endfor %}
+Entity label for this run: {{ label }}
+
+Label-specific instructions:
+{{ label_instructions }}
 
 Rules:
-1) Return ONLY exact, verbatim substrings from the input text as `quote`.
-2) The `label` field MUST be one of the labels listed above (it is a schema-enforced enum).
-3) Emit one entry per occurrence — if the same quote appears twice, return it twice.
-4) If no entities of any listed type are present, return an empty `entities` list.
+1) Return exact, verbatim substrings from the input text in `matches`.
+2) If the label is not present, return an empty `matches` array.
+3) The `label` field MUST be the string {{ label | tojson }} — the JSON schema enforces this as a single-value enum.
+4) `confidence` is a number 0.0-1.0.
 5) Do not infer, normalize, paraphrase, or change casing or punctuation.
-6) `confidence` is 0.0–1.0 per item.
+
+All labels in this run (context only — focus on {{ label }}):
+{% for allowed_label in allowed_labels -%}
+- {{ allowed_label }}
+{% endfor %}

@@ -1,26 +1,28 @@
-"""Canonical Pydantic v2 shapes for NER training-data generation.
+"""Pydantic v2 shapes for NER training-data generation.
 
-Every field carries a `description` — for the LLM-facing shapes
-(`ExtractedEntity`, `Extraction`) these descriptions are emitted into the JSON
-schema sent to the model and guide it on what to fill in. For the trainer-
-facing shapes (`EntitySpan`, `TaggedEntity`, `TrainingRecord`) they document
-the contract for downstream consumers.
+Five shapes in two groups. Each field is documented; the descriptions on
+`LabelExtraction` and its fields are emitted into the JSON schema sent to the
+LLM and become its guidance.
 
-Override anything by subclassing: descriptions, validation, defaults — all
-inherited Pydantic mechanics work normally.
+LLM-facing (what the LLM sees and fills in — one call per label):
 
-Layers, in the order they're produced during a run:
+    LabelPrompt        # input: a label name + its instructions
+    LabelExtraction    # output: {label, matches, confidence} for ONE label
 
-1. `ExtractedEntity` — one `(quote, label, confidence)` tuple the LLM emits.
-2. `Extraction`      — the LLM's full response: a list of ExtractedEntities.
-3. `EntitySpan`      — one character-indexed span inside the input text.
-4. `TaggedEntity`    — one label with confidence + the spans we found.
-5. `TrainingRecord`  — one input text + all tagged entities (JSONL row shape).
+Trainer-facing (what you assemble after the calls return):
 
-Absence convention:
-    A label that's not represented in `Extraction.entities` is "not present in
-    this input." There is NO sentinel string — `"none"`, `"None"`, etc. are
-    valid quote values treated as literal substrings.
+    EntitySpan         # one occurrence of a quote, with character offsets
+    TaggedEntity       # one label's confidence + all its spans
+    TrainingRecord     # one input text + the per-label TaggedEntities
+
+Architecture: one LLM call per (text, label). Each call's response_model is a
+subclass of `LabelExtraction` with `label` pinned to `Literal["<that_label>"]`
+— a single-value enum. The `matches` list is the substrings the LLM found for
+THAT one label. You assemble `TrainingRecord` in your own code from N
+`LabelExtraction` instances.
+
+Absence convention: empty `matches` means "label not present in this text."
+No sentinel strings.
 """
 from __future__ import annotations
 
@@ -29,49 +31,55 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class ExtractedEntity(BaseModel):
-    """One (quote, label, confidence) tuple from a multi-label extraction call."""
+class LabelPrompt(BaseModel):
+    """A label name plus its extraction instructions. Input only; never sent to the LLM as JSON."""
 
     model_config = ConfigDict(frozen=True)
 
-    quote: str = Field(
+    label: str = Field(
         min_length=1,
-        description=(
-            "Exact verbatim substring from the input text. Must be character-for-character "
-            "identical: same casing, same whitespace, same punctuation. Do not paraphrase, "
-            "summarize, or normalize."
-        ),
+        description="Short label identifier — snake_case is conventional.",
     )
+    instructions: str = Field(
+        min_length=1,
+        description="Natural-language description of what to extract for this label.",
+    )
+
+
+class LabelExtraction(BaseModel):
+    """The LLM's response for ONE per-label call.
+
+    The pipeline pins `label` to a `Literal["<label_name>"]` subclass per call,
+    so the schema enforces label-as-enum at the JSON-schema level. The
+    `matches` list is the verbatim substrings the LLM found for that one label.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
     label: str = Field(
         min_length=1,
         description=(
-            "Entity type for this quote. Must be one of the labels defined in the system "
-            "prompt — the schema enforces this as an enum, so out-of-set values are rejected "
-            "before they reach the application."
+            "The entity type this call is extracting. The schema pins this to "
+            "a single-value enum, so the only valid value is the label this call "
+            "is for."
+        ),
+    )
+    matches: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Verbatim substrings of the input text that are instances of this "
+            "label. Empty list = label not present. One entry per occurrence — "
+            "if the same quote appears twice, return it twice. No paraphrasing, "
+            "no normalization, no casing or punctuation changes."
         ),
     )
     confidence: float = Field(
         ge=0,
         le=1,
         description=(
-            "How certain you are that this quote is an instance of this label. 0.0 means "
-            "uncertain; 1.0 means very confident. Use intermediate values to express partial "
-            "confidence."
-        ),
-    )
-
-
-class Extraction(BaseModel):
-    """The LLM's full response — every entity extracted from one input text."""
-
-    model_config = ConfigDict(frozen=True)
-
-    entities: list[ExtractedEntity] = Field(
-        default_factory=list,
-        description=(
-            "Every entity instance present in the input text. Emit one entry per occurrence "
-            "— if the same quote appears twice, return it twice. Return an empty list when "
-            "no entities of any listed type are present."
+            "How confident you are in this extraction overall, 0.0-1.0. Use "
+            "intermediate values to express partial confidence. If `matches` is "
+            "empty, this is your confidence that the label is not present."
         ),
     )
 
@@ -81,26 +89,10 @@ class EntitySpan(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    text: str = Field(
-        min_length=1,
-        description="The literal substring matched at this position.",
-    )
-    start: int = Field(
-        ge=0,
-        description="Inclusive character offset into the input text (0-indexed).",
-    )
+    text: str = Field(min_length=1, description="The literal substring at this position.")
+    start: int = Field(ge=0, description="Inclusive character offset (0-indexed).")
     end: int = Field(
-        ge=1,
-        description="Exclusive character offset. `text[start:end]` equals this span's `text`.",
-    )
-    confidence: float | None = Field(
-        default=None,
-        ge=0,
-        le=1,
-        description=(
-            "Per-occurrence confidence carried over from the LLM's extraction. None when "
-            "the span was located by fuzzy matching with no exact quote correspondence."
-        ),
+        ge=1, description="Exclusive character offset. `input_text[start:end]` equals `text`."
     )
 
     @model_validator(mode="after")
@@ -111,21 +103,15 @@ class EntitySpan(BaseModel):
 
 
 class TaggedEntity(BaseModel):
-    """All spans found for a single label, plus the label's overall confidence."""
+    """All spans found for a single label, plus the label-level confidence."""
 
     model_config = ConfigDict(frozen=True)
 
-    label: str = Field(
-        min_length=1,
-        description="The entity type for this group of spans.",
-    )
+    label: str = Field(min_length=1, description="The entity type.")
     confidence: float = Field(
         ge=0,
         le=1,
-        description=(
-            "Aggregated confidence across the spans (the default helper uses the mean of "
-            "per-span confidences; 0.0 when no spans were found)."
-        ),
+        description="Confidence carried over from the per-label LabelExtraction.",
     )
     spans: list[EntitySpan] = Field(
         default_factory=list,
@@ -134,18 +120,16 @@ class TaggedEntity(BaseModel):
 
 
 class TrainingRecord(BaseModel):
-    """One row of training data: the input text + all extracted entities keyed by label."""
+    """One row of training data: input text + all extracted entities keyed by label."""
 
     model_config = ConfigDict(frozen=True)
 
-    input_text: str = Field(
-        min_length=1,
-        description="The original text the LLM was given.",
-    )
+    input_text: str = Field(min_length=1, description="The original text the LLM was given.")
     entities: dict[str, TaggedEntity] = Field(
         default_factory=dict,
         description=(
-            "All extracted entities, keyed by label name. Every requested label appears "
-            "here; absent labels have an empty `spans` list and confidence 0.0."
+            "All entities keyed by label name. Conventionally every label asked "
+            "for appears here, with an empty `spans` list when the label was "
+            "absent — but the data model doesn't enforce that."
         ),
     )

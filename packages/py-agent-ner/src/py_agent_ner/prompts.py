@@ -1,49 +1,28 @@
-"""Label-prompt loading + combined multi-label system-prompt rendering.
+"""Label-prompt loading + single-label system-prompt rendering.
 
-These are NER-specific concepts and live here, NOT in py-agent-lib (which is
-domain-agnostic and never imports Jinja2).
+`label_prompts_from_dict` and `load_label_prompts` parse the (label,
+instructions) pairs. `build_system_prompt` renders ONE LabelPrompt into the
+system prompt for ONE LLM call — the per-label call you fan out.
 
-Two-part flow:
-    1. Define each label's extraction instructions via either:
-       - `label_prompts_from_dict({"person_name": "Full names...", ...})`
-       - `load_label_prompts("./labels/")`   (one file per label)
-       Both return `list[LabelPrompt]` — just (label, instructions) pairs.
-
-    2. Render those into a single multi-label system prompt via
-       `build_system_prompt(label_prompts, base_template=...)`. That string is
-       what the pipeline sends to the LLM.
-
-The pipeline calls (2) for you. (1) is also what you pass to
-`extract_training_data(..., labels=...)`.
+Why single-label rendering: the architecture is one LLM call per label, each
+with its own focused system prompt that says "extract THIS one entity type."
+The `all_labels` kwarg lets the template optionally list every label in the
+run as context — useful for disambiguation, but the model is still asked for
+exactly one label per call.
 """
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class LabelPrompt(BaseModel):
-    """One label and the extraction instructions that describe it."""
-
-    model_config = ConfigDict(frozen=True)
-
-    label: str = Field(
-        min_length=1,
-        description="Short label identifier (snake_case is conventional).",
-    )
-    instructions: str = Field(
-        min_length=1,
-        description="Natural-language description of what to extract for this label.",
-    )
+from .models import LabelPrompt
 
 
 def label_prompts_from_dict(labels: Mapping[str, str]) -> list[LabelPrompt]:
-    """Build a list of `LabelPrompt` from a `{label: instructions}` mapping.
+    """Build `[LabelPrompt]` from a `{label: instructions}` mapping.
 
     Raises:
-        ValueError: if `labels` is empty, or any value is blank after `.strip()`.
+        ValueError: if `labels` is empty or any value is blank after `.strip()`.
     """
     if not labels:
         raise ValueError("labels must not be empty")
@@ -63,12 +42,11 @@ def load_label_prompts(
 ) -> list[LabelPrompt]:
     """Read every `<extension>` file in `labels_dir`. Filename = label, contents = instructions.
 
-    Files are sorted by name for deterministic ordering. The file content is
-    treated as a plain string; no per-label Jinja rendering happens here.
+    Files are sorted by name for deterministic ordering.
 
     Raises:
-        FileNotFoundError: if the directory doesn't exist or has no matching files.
-        ValueError:        if any file is blank after `.strip()`.
+        FileNotFoundError: the directory doesn't exist or has no matching files.
+        ValueError: any file is blank after `.strip()`.
     """
     directory = Path(labels_dir)
     if not directory.is_dir():
@@ -93,21 +71,26 @@ def labels_of(prompts: Iterable[LabelPrompt]) -> list[str]:
 
 
 DEFAULT_BASE_TEMPLATE = """\
-You are an entity extraction system.
+You are a {{ expert_role }} classifier.
 
-Extract every instance of the following entity types from the input text:
+You label ONE entity type at a time.
 
-{% for lp in label_prompts -%}
-- **{{ lp.label }}**: {{ lp.instructions }}
-{% endfor %}
+Entity label for this run: {{ label }}
+
+Label-specific instructions:
+{{ label_instructions }}
 
 Rules:
-1) Return ONLY exact, verbatim substrings from the input text as `quote`.
-2) The `label` field MUST be one of the labels listed above (it's a schema-enforced enum).
-3) Emit one entry per occurrence — if the same quote appears twice, return it twice.
-4) If no entities of any listed type are present, return an empty `entities` list.
+1) Return exact, verbatim substrings from the input text in `matches`.
+2) If the label is not present, return an empty `matches` array.
+3) The `label` field MUST be the string {{ label | tojson }} — the JSON schema enforces this as a single-value enum.
+4) `confidence` is a number 0.0-1.0.
 5) Do not infer, normalize, paraphrase, or change casing or punctuation.
-6) `confidence` is 0.0-1.0 per item.
+
+All labels in this run (context only — focus on {{ label }}):
+{% for allowed_label in allowed_labels -%}
+- {{ allowed_label }}
+{% endfor %}
 """
 
 
@@ -121,25 +104,31 @@ def _require_jinja() -> None:
 
 
 def build_system_prompt(
-    label_prompts: Iterable[LabelPrompt],
+    label_prompt: LabelPrompt,
     *,
+    all_labels: Iterable[str] | None = None,
+    expert_role: str | None = None,
     base_template: str | None = None,
 ) -> str:
-    """Render the multi-label system prompt for one extraction call.
+    """Render the system prompt for ONE per-label LLM call.
 
     Args:
-        label_prompts: every label this run will extract.
+        label_prompt: the single label this call is for.
+        all_labels: optional list of every label in this run. Surfaced to the
+            template as `allowed_labels` for context; the model is still asked
+            for only `label_prompt.label`. Defaults to `[label_prompt.label]`.
+        expert_role: value for `{{ expert_role }}` in the template. Defaults
+            to `"<label> entity extraction"`.
         base_template: Jinja2 source. Defaults to `DEFAULT_BASE_TEMPLATE`.
 
-    Available Jinja variables:
-        - `label_prompts`: iterable of `LabelPrompt` (each has `.label`, `.instructions`)
+    Available Jinja variables (in `DEFAULT_BASE_TEMPLATE`):
+        - `label`              — `label_prompt.label`
+        - `label_instructions` — `label_prompt.instructions`
+        - `allowed_labels`     — `all_labels` (or `[label_prompt.label]`)
+        - `expert_role`        — the value above
     """
     _require_jinja()
     import jinja2
-
-    prompts = list(label_prompts)
-    if not prompts:
-        raise ValueError("label_prompts must not be empty")
 
     env = jinja2.Environment(
         autoescape=False,
@@ -150,12 +139,16 @@ def build_system_prompt(
     template = env.from_string(
         base_template if base_template is not None else DEFAULT_BASE_TEMPLATE
     )
-    return template.render(label_prompts=prompts)
+    return template.render(
+        label=label_prompt.label,
+        label_instructions=label_prompt.instructions,
+        allowed_labels=list(all_labels) if all_labels is not None else [label_prompt.label],
+        expert_role=expert_role or f"{label_prompt.label} entity extraction",
+    )
 
 
 __all__ = [
     "DEFAULT_BASE_TEMPLATE",
-    "LabelPrompt",
     "build_system_prompt",
     "label_prompts_from_dict",
     "labels_of",

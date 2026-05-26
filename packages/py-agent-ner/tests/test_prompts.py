@@ -1,10 +1,9 @@
-"""Tests for label-prompt loading and combined system-prompt rendering."""
+"""Tests for label loading + single-label prompt rendering."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from py_agent_ner import (
     DEFAULT_BASE_TEMPLATE,
@@ -14,6 +13,8 @@ from py_agent_ner import (
     labels_of,
     load_label_prompts,
 )
+
+# ---- label_prompts_from_dict ----
 
 
 def test_label_prompts_from_dict_basic() -> None:
@@ -29,7 +30,7 @@ def test_label_prompts_from_dict_strips_whitespace() -> None:
     assert prompts[0].instructions == "do x"
 
 
-def test_label_prompts_from_dict_rejects_empty() -> None:
+def test_label_prompts_from_dict_rejects_empty_mapping() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         label_prompts_from_dict({})
 
@@ -39,11 +40,13 @@ def test_label_prompts_from_dict_rejects_blank_instructions() -> None:
         label_prompts_from_dict({"x": "   \n"})
 
 
+# ---- load_label_prompts ----
+
+
 def test_load_label_prompts_from_dir(tmp_path: Path) -> None:
     (tmp_path / "person_name.jinja").write_text("Names.", encoding="utf-8")
     (tmp_path / "time_reference.jinja").write_text("Times.", encoding="utf-8")
     prompts = load_label_prompts(tmp_path)
-    # sorted by filename
     assert labels_of(prompts) == ["person_name", "time_reference"]
     assert prompts[0].instructions == "Names."
 
@@ -64,37 +67,57 @@ def test_load_label_prompts_rejects_blank_file(tmp_path: Path) -> None:
         load_label_prompts(tmp_path)
 
 
-def test_label_prompt_is_frozen() -> None:
-    lp = LabelPrompt(label="x", instructions="y")
-    with pytest.raises(ValidationError, match="frozen"):
-        lp.label = "changed"  # type: ignore[misc]
+# ---- build_system_prompt ----
 
 
-def test_build_system_prompt_lists_all_labels() -> None:
-    prompts = label_prompts_from_dict(
-        {"person_name": "Names.", "location_reference": "Places."}
-    )
-    rendered = build_system_prompt(prompts)
+def test_build_system_prompt_renders_single_label() -> None:
+    lp = LabelPrompt(label="person_name", instructions="Full names.")
+    rendered = build_system_prompt(lp)
     assert "person_name" in rendered
-    assert "Names." in rendered
-    assert "location_reference" in rendered
-    assert "Places." in rendered
+    assert "Full names." in rendered
+    assert "person_name entity extraction" in rendered  # default expert_role
 
 
-def test_build_system_prompt_default_template_has_no_jinja_residue() -> None:
-    prompts = label_prompts_from_dict({"x": "do x"})
-    rendered = build_system_prompt(prompts, base_template=DEFAULT_BASE_TEMPLATE)
+def test_build_system_prompt_lists_all_labels_for_context() -> None:
+    """`all_labels` should appear in the rendered prompt so the LLM sees siblings."""
+    lp = LabelPrompt(label="x", instructions="do x")
+    rendered = build_system_prompt(lp, all_labels=["x", "y", "z"])
+    assert "x" in rendered
+    assert "- y" in rendered
+    assert "- z" in rendered
+
+
+def test_build_system_prompt_all_labels_defaults_to_current_only() -> None:
+    """When `all_labels` is not given, the template just lists the current label."""
+    lp = LabelPrompt(label="x", instructions="do x")
+    rendered = build_system_prompt(lp)
+    # contains the current label in the allowed_labels block
+    assert "- x" in rendered
+
+
+def test_build_system_prompt_custom_expert_role() -> None:
+    lp = LabelPrompt(label="x", instructions="do x")
+    rendered = build_system_prompt(lp, expert_role="strict classifier of x")
+    assert "You are a strict classifier of x classifier" in rendered
+
+
+def test_build_system_prompt_custom_template() -> None:
+    lp = LabelPrompt(label="abc", instructions="do abc")
+    base = "Label={{ label }} | Instr={{ label_instructions }}"
+    assert build_system_prompt(lp, base_template=base) == "Label=abc | Instr=do abc"
+
+
+def test_default_template_renders_cleanly() -> None:
+    """Sanity: the shipped template has no leftover Jinja markup after rendering."""
+    lp = LabelPrompt(label="x", instructions="do x")
+    rendered = build_system_prompt(lp, all_labels=["x"], base_template=DEFAULT_BASE_TEMPLATE)
     assert "{{" not in rendered
     assert "{%" not in rendered
     assert "%}" not in rendered
 
 
-def test_build_system_prompt_custom_template() -> None:
-    base = "Labels: {% for lp in label_prompts %}{{ lp.label }} {% endfor %}"
-    prompts = label_prompts_from_dict({"a": "do a", "b": "do b"})
-    assert build_system_prompt(prompts, base_template=base) == "Labels: a b "
-
-
-def test_build_system_prompt_rejects_empty_prompts() -> None:
-    with pytest.raises(ValueError, match="must not be empty"):
-        build_system_prompt([])
+def test_default_template_emits_json_quoted_label() -> None:
+    """Rule 3 uses `{{ label | tojson }}` so the LLM sees the literal JSON string."""
+    lp = LabelPrompt(label="contact_handle", instructions="do it")
+    rendered = build_system_prompt(lp)
+    assert '"contact_handle"' in rendered
