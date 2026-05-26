@@ -1,0 +1,49 @@
+# Workspace root. The publishable packages live under `packages/`; this file
+# only configures the workspace and shared dev tooling.
+
+[project]
+name = "py-agent-workspace"
+version = "0"
+description = "Workspace root for py-agent-lib + py-agent-ner. Not published."
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# Within the workspace, `py-agent-ner`'s declared dependency on `py-agent-lib`
+# resolves to the in-tree package instead of PyPI. Outside the workspace
+# (`pip install py-agent-ner`), it falls back to the published artifact.
+[tool.uv.sources]
+py-agent-lib = { workspace = true }
+py-agent-ner = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "py-agent-lib[dev]",
+    "py-agent-ner[dev]",
+]
+
+# Shared lint config — keeps both packages and the example consistent.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = [
+    "E501",
+    "RUF022",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# `importlib` mode avoids the `tests` package-name collision when collecting
+# multiple `packages/*/tests/` directories from a single rootdir.
+addopts = "--import-mode=importlib"
+testpaths = ["packages/py-agent-lib/tests", "packages/py-agent-ner/tests"]
+
+[tool.pyright]
+include = ["packages/*/src", "packages/*/tests", "examples"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false

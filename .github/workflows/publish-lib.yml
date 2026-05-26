@@ -1,0 +1,71 @@
+name: publish py-agent-lib
+
+# Triggered by tags of the form `lib-vX.Y.Z`. Builds and uploads
+# `packages/py-agent-lib` to PyPI via trusted publishing (OIDC).
+#
+# Setup once per PyPI project:
+#   PyPI → Manage → Publishing → Add a new pending publisher
+#     Owner:    gaslit-ai
+#     Repo:     py-agent
+#     Workflow: publish-lib.yml
+#     Env:      pypi
+on:
+  push:
+    tags: ["lib-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Verify tag matches package version
+        working-directory: packages/py-agent-lib
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#lib-v}"
+          pkg=$(uv run --with hatch hatch version)
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag version ($tag) does not match package version ($pkg)" >&2
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build --package py-agent-lib --sdist --wheel
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: py-agent-lib-dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/py-agent-lib/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: py-agent-lib-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "py-agent-lib"
+dynamic = ["version"]
+description = "Minimal, domain-agnostic DAG scheduler/executor for step-based workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Vector" }]
+keywords = ["dag", "scheduler", "agent", "workflow", "pydantic"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.6",
+    "tenacity>=8.2",
+]
+
+[project.optional-dependencies]
+# LLM clients — OpenAI-compatible providers + native Ollama (via httpx).
+llm = ["instructor>=1.5", "openai>=1.40", "httpx>=0.27"]
+# Anthropic uses messages.create, not chat.completions — separate extra.
+anthropic = ["instructor>=1.5", "anthropic>=0.40"]
+# litellm gives universal provider routing in one client.
+litellm = ["instructor>=1.5", "litellm>=1.50"]
+# Fuzzy span matching (generic substring locator with rapidfuzz fallback).
+fuzzy = ["rapidfuzz>=3.6"]
+# OpenTelemetry observer — events become spans.
+otel = ["opentelemetry-api>=1.25"]
+# Everything optional.
+all = ["py-agent-lib[llm,anthropic,litellm,fuzzy,otel]"]
+dev = [
+    "py-agent-lib[all]",
+    "opentelemetry-sdk>=1.25",  # span exporters for OtelObserver tests
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6.0",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "respx>=0.21",  # mocking httpx for instructor/openai client tests
+]
+
+[project.urls]
+Homepage = "https://github.com/gaslit-ai/py-agent/tree/main/packages/py-agent-lib"
+Repository = "https://github.com/gaslit-ai/py-agent"
+Issues = "https://github.com/gaslit-ai/py-agent/issues"
+Changelog = "https://github.com/gaslit-ai/py-agent/releases?q=lib-v"
+
+[tool.hatch.version]
+path = "src/py_agent_lib/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/py_agent_lib"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/py_agent_lib", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = [
+    "E501",   # line length handled by formatter
+    "RUF022", # __all__ grouped by module (not alphabetical) for readability
+]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false

@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "py-agent-ner"
+dynamic = ["version"]
+description = "NER training-data generation built on py-agent-lib. Bring your own labels, LLM, and downstream trainer."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Vector" }]
+keywords = ["ner", "named-entity-recognition", "training-data", "llm", "agent", "pydantic"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
+dependencies = [
+    "py-agent-lib[llm,fuzzy]>=0.1",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+]
+
+[project.urls]
+Homepage = "https://github.com/gaslit-ai/py-agent/tree/main/packages/py-agent-ner"
+Repository = "https://github.com/gaslit-ai/py-agent"
+Issues = "https://github.com/gaslit-ai/py-agent/issues"
+Changelog = "https://github.com/gaslit-ai/py-agent/releases?q=ner-v"
+
+[tool.hatch.version]
+path = "src/py_agent_ner/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/py_agent_ner"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/py_agent_ner", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = [
+    "E501",
+    "RUF022",
+]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
